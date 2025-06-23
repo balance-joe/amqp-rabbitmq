@@ -1,7 +1,7 @@
 <?php
+
 namespace Linjoe\Amqp;
 
-use http\Exception\RuntimeException;
 use PhpAmqpLib\Message\AMQPMessage;
 use support\Log;
 
@@ -11,11 +11,11 @@ class ConsumerRunner
 
     public function __construct(array $consumers = [])
     {
+        // key 是队列名，value 是对应消费者类
         $this->consumers = $consumers ?: [
             'email.send' => \app\Consumer\EmailConsumer::class,
-            // 添加更多 queue => ConsumerClass
+            // 更多队列 => 消费者类映射...
         ];
-        var_dump($this->consumers);
     }
 
     public function onWorkerStart(): void
@@ -29,29 +29,42 @@ class ConsumerRunner
 
     protected function startConsume(string $queue, string $consumerClass): void
     {
-        /** @var BaseConsumer $consumer */
         $consumer = new $consumerClass();
 
-        $config = config('rabbitmq.connections.default');
-        if (!$config){
-            throw new RuntimeException("AMQP消费异常:配置不存在 ({$queue}): " .json_encode($config) );
-        }
-
+        $config     = config('rabbitmq.connections.default');
         $connection = ConnectionManager::get('default', $config);
-        $channel = $connection->channel();
+        $channel    = $connection->channel();
 
-        $channel->queue_declare($queue, false, true, false, false);
+        // 从配置获取声明参数
+        $queueConfig = config("rabbitmq.queues.$queue", []);
 
-        $channel->basic_qos(0, 1, false); // 每次只分发一个消息
+        $exchange     = $queueConfig['exchange'] ?? 'default-exchange';
+        $exchangeType = $queueConfig['exchange_type'] ?? 'direct';
+        $routingKey   = $queueConfig['routing_key'] ?? $queue;
 
-        var_dump("监听的queue：   $queue");
-        $channel->basic_consume($queue, '', false, false, false, false,
+        // 统一声明队列和交换机，参数完全保持一致
+        QueueDeclarator::declare(
+            $channel,
+            $queue,
+            $exchange,
+            $routingKey,
+            $queueConfig
+        );
+
+        $channel->basic_qos(0, 1, false); // 一次只推送一个任务
+
+        $channel->basic_consume(
+            $queue,
+            '',
+            false,
+            false,
+            false,
+            false,
             function (AMQPMessage $msg) use ($consumer) {
                 try {
-                    $consumer->consume($msg); // 统一交由 BaseConsumer::consume 处理
+                    $consumer->consume($msg);
                 } catch (\Throwable $e) {
-                    var_dump("AMQP 消费异常：{$e->getMessage()} ");
-                    \support\Log::error("AMQP 消费异常：{$e->getMessage()}");
+                    Log::error("AMQP消费异常：" . $e->getMessage());
                 }
             }
         );
@@ -60,31 +73,9 @@ class ConsumerRunner
             try {
                 $channel->wait();
             } catch (\Throwable $e) {
-                var_dump("AMQP消费循环异常：{$e->getMessage()} ");
-
                 Log::error("AMQP消费循环异常 ({$queue}): " . $e->getMessage());
                 break;
             }
         }
-    }
-
-    /**
-     * 提取 x-death 或自定义 headers 中的重试次数
-     */
-    protected function extractRetryCount(AMQPMessage $msg): int
-    {
-        $headers = $msg->has('application_headers')
-            ? $msg->get('application_headers')->getNativeData()
-            : [];
-
-        if (isset($headers['x-death'][0]['count'])) {
-            return (int) $headers['x-death'][0]['count'];
-        }
-
-        if (isset($headers['x-retry'])) {
-            return (int) $headers['x-retry'];
-        }
-
-        return 0;
     }
 }

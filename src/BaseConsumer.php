@@ -35,9 +35,13 @@ abstract class BaseConsumer implements ConsumerInterface
     protected function extractRetryCount(AMQPMessage $msg): int
     {
         $headers = $msg->get('application_headers');
-        if ($headers && isset($headers->getNativeData()['x-death'][0]['count'])) {
-            return (int) $headers->getNativeData()['x-death'][0]['count'];
+        if ($headers instanceof \PhpAmqpLib\Wire\AMQPTable) {
+            $data = $headers->getNativeData();
+            if (isset($data['x-death'][0]['count'])) {
+                return (int) $data['x-death'][0]['count'];
+            }
         }
         return 0;
     }
+
 }

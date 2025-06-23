@@ -1,4 +1,5 @@
 <?php
+
 namespace Linjoe\Amqp;
 
 use PhpAmqpLib\Message\AMQPMessage;
@@ -6,8 +7,7 @@ use PhpAmqpLib\Message\AMQPMessage;
 class Publisher
 {
     public static function publish(
-        string $exchange,
-        string $routingKey,
+        string $queue,
         string $payload,
         array $options = [],
         string $connection = 'default'
@@ -16,25 +16,33 @@ class Publisher
         $conn   = ConnectionManager::get($connection, $config);
         $channel = $conn->channel();
 
-        $deliveryMode = $options['delivery_mode'] ?? 2;
-        $properties   = $options['properties'] ?? [];
+        // 从配置获取队列参数，优先使用传入 options 覆盖
+        $queueConfig = config("rabbitmq.queues.$queue", []);
 
-        // 构造 AMQP 消息对象
-        $msg = new AMQPMessage($payload, array_merge([
+        $exchange      = $queueConfig['exchange'] ?? ($options['exchange'] ?? 'default-exchange');
+        $exchangeType  = $queueConfig['exchange_type'] ?? ($options['exchange_type'] ?? 'direct');
+        $routingKey    = $queueConfig['routing_key'] ?? ($options['routing_key'] ?? $queue);
+
+        $declareOptions = array_merge($queueConfig, $options);
+
+        $deliveryMode = $declareOptions['delivery_mode'] ?? 2; // 默认持久化消息
+
+        $msg = new AMQPMessage($payload, [
             'delivery_mode' => $deliveryMode,
-        ], $properties));
+            'content_type' => $declareOptions['content_type'] ?? 'text/plain',
+        ]);
 
-        // 声明交换机（type: direct，持久化）
-        $channel->exchange_declare($exchange, 'direct', false, true, false);
+        // 统一声明队列和交换机，传入全部声明参数，避免冲突
+        QueueDeclarator::declare(
+            $channel,
+            $queue,
+            $exchange,
+            $routingKey,
+            $declareOptions
+        );
 
-        // 声明队列 + 绑定（routingKey == queue）
-        $channel->queue_declare($routingKey, false, true, false, false);
-        $channel->queue_bind($routingKey, $exchange, $routingKey);
-
-        // 发布消息
         $channel->basic_publish($msg, $exchange, $routingKey);
 
-        // 关闭 channel，连接复用
         $channel->close();
     }
 }
